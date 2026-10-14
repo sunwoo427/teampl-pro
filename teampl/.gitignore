@@ -1,0 +1,32 @@
+# 환경 변수 (민감 정보)
+.env
+.env.*
+!.env.example
+
+# Firebase 서비스 계정 키
+*serviceAccount*.json
+*service-account*.json
+firebase-adminsdk*.json
+
+# 인증서 및 개인키
+certs/
+*.pem
+*.key
+*.p12
+*.pfx
+teampl.pem
+
+# Node
+node_modules/
+
+# 빌드 결과물
+dist/
+build/
+coverage/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 로컬 설정
+nginx.conf

@@ -1,0 +1,672 @@
+import { prisma } from '../../prisma';
+import OpenAI from 'openai';
+import { verifyMembership } from './membership';
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+export interface Project {
+    id: number;
+    name: string;
+    course?: string;
+    description?: string;
+    progress: number;
+    deadline: string;
+    members: number;
+    color?: string;
+    iconColor?: string;
+    progressColor?: string;
+    icon?: string;
+}
+
+export const ProjectsService = {
+    getAll: async (email: string) => {
+        if (!email) return [];
+        const memberships = await prisma.projectMember.findMany({
+            where: { userEmail: email, status: 'ACTIVE' },
+            include: { 
+                project: {
+                    include: {
+                        projectMembers: {
+                            where: { status: 'ACTIVE' },
+                            include: { user: true }
+                        }
+                    }
+                } 
+            },
+            orderBy: { project: { id: 'desc' } }
+        });
+        
+        return memberships.map((m: any) => {
+            const projectData: any = { ...m.project, userRole: m.role, userStatus: m.status, kickReason: m.kickReason };
+            if (projectData.projectMembers) {
+                projectData.membersList = projectData.projectMembers.map((pm: any) => ({
+                    id: pm.user.id,
+                    email: pm.user.email,
+                    name: pm.user.name,
+                    department: pm.user.department,
+                    studentId: pm.user.studentId,
+                    avatarUrl: pm.user.avatarUrl,
+                    role: pm.role,
+                    avatarColor: pm.role === 'LEADER' ? 'bg-[#7C6CFF]' : 'bg-[#27D7A1]'
+                }));
+                delete projectData.projectMembers;
+            }
+            return projectData;
+        });
+    },
+
+    create: async (email: string, data: Partial<Project>) => {
+        let formattedDeadline = data.deadline || "미정";
+        if (formattedDeadline.indexOf('-') !== -1) {
+            formattedDeadline = formattedDeadline.replace(/-/g, '.');
+        }
+
+        const generatedInviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+
+        const newProject = await prisma.project.create({
+            data: {
+                name: data.name || '새 프로젝트',
+                course: data.course || '기타',
+                description: data.description || '',
+                progress: typeof data.progress === 'number' ? data.progress : 0,
+                deadline: formattedDeadline,
+                members: typeof data.members === 'number' ? data.members : 1,
+                color: data.color || "bg-[#f1f5f9]",
+                icon: data.icon || "Target",
+                inviteCode: generatedInviteCode,
+            }
+        });
+
+        if (email) {
+            await prisma.projectMember.create({
+                data: {
+                    userEmail: email,
+                    projectId: newProject.id,
+                    role: 'LEADER'
+                }
+            });
+        }
+
+        return newProject;
+    },
+
+    update: async (email: string, id: number, data: Partial<Project>) => {
+        const member = await prisma.projectMember.findUnique({
+            where: { userEmail_projectId: { userEmail: email, projectId: Number(id) } }
+        });
+        if (!member || member.role !== 'LEADER') {
+            throw new Error('프로젝트 수정 권한이 없습니다.');
+        }
+
+        let formattedDeadline = data.deadline;
+        if (formattedDeadline && formattedDeadline.indexOf('-') !== -1) {
+            formattedDeadline = formattedDeadline.replace(/-/g, '.');
+        }
+
+        const updateData: any = {};
+        if (data.name !== undefined) updateData.name = data.name;
+        if (data.course !== undefined) updateData.course = data.course;
+        if (data.description !== undefined) updateData.description = data.description;
+        if (data.progress !== undefined) updateData.progress = data.progress;
+        if (formattedDeadline !== undefined) updateData.deadline = formattedDeadline;
+        if (data.members !== undefined) updateData.members = data.members;
+        if (data.color !== undefined) updateData.color = data.color;
+        if (data.icon !== undefined) updateData.icon = data.icon;
+
+        return await prisma.project.update({
+            where: { id: Number(id) },
+            data: updateData
+        });
+    },
+
+    delete: async (email: string, id: number, deleteReason?: string) => {
+        try {
+            const member = await prisma.projectMember.findUnique({
+                where: { userEmail_projectId: { userEmail: email, projectId: Number(id) } }
+            });
+            if (!member || member.role !== 'LEADER') {
+                return false;
+            }
+
+            // 삭제 전 모든 활성 팀원 목록 조회
+            const allMembers = await prisma.projectMember.findMany({
+                where: { projectId: Number(id), status: 'ACTIVE', userEmail: { not: email } }
+            });
+
+            // 프로젝트 이름 조회
+            const project = await prisma.project.findUnique({ where: { id: Number(id) } });
+            const projectName = project?.name || '알 수 없는 프로젝트';
+            const reason = deleteReason || '팀장이 프로젝트를 종료했습니다.';
+
+            // 각 팀원에게 삭제 알림 생성
+            if (allMembers.length > 0) {
+                await prisma.projectDeleteAlert.createMany({
+                    data: allMembers.map((m: any) => ({
+                        userEmail: m.userEmail,
+                        projectName,
+                        deleteReason: reason,
+                    }))
+                });
+            }
+
+            await prisma.project.delete({ where: { id: Number(id) } });
+            return true;
+        } catch (e) {
+            return false;
+        }
+    },
+
+    join: async (email: string, inviteCode: string, userName: string) => {
+        const project = await prisma.project.findUnique({
+            where: { inviteCode }
+        });
+        
+        if (project) {
+            // 이미 가입했는지 확인
+            const existing = await prisma.projectMember.findUnique({
+                where: { userEmail_projectId: { userEmail: email, projectId: project.id } }
+            });
+            
+            if (!existing) {
+                await prisma.projectMember.create({
+                    data: {
+                        userEmail: email,
+                        projectId: project.id,
+                        role: 'MEMBER'
+                    }
+                });
+                return await prisma.project.update({
+                    where: { id: project.id },
+                    data: { members: project.members + 1 }
+                });
+            } else if (existing.status === 'KICKED') {
+                await prisma.projectMember.update({
+                    where: { userEmail_projectId: { userEmail: email, projectId: project.id } },
+                    data: { status: 'ACTIVE', kickReason: null }
+                });
+                return await prisma.project.update({
+                    where: { id: project.id },
+                    data: { members: project.members + 1 }
+                });
+            }
+            return project; // 이미 가입된 경우 기존 정보 반환
+        }
+        return null;
+    },
+
+    regenerateInviteCode: async (email: string, projectId: number) => {
+        const member = await prisma.projectMember.findUnique({
+            where: { userEmail_projectId: { userEmail: email, projectId } }
+        });
+        if (!member || member.role !== 'LEADER') throw new Error('권한이 없습니다.');
+
+        const newInviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+        return await prisma.project.update({
+            where: { id: projectId },
+            data: { inviteCode: newInviteCode }
+        });
+    },
+
+    inviteByEmail: async (email: string, projectId: number, targetEmail: string) => {
+        // 1. 요청한 사람이 방장인지 확인
+        const me = await prisma.projectMember.findUnique({
+            where: { userEmail_projectId: { userEmail: email, projectId } },
+            include: { project: true }
+        });
+        if (!me || me.role !== 'LEADER') throw new Error('팀원 초대 권한이 없습니다.');
+
+        // 2. 타겟 이메일을 가진 유저가 존재하는지 확인
+        const targetUser = await prisma.user.findUnique({
+            where: { email: targetEmail }
+        });
+        if (!targetUser) throw new Error('가입되지 않은 회원입니다.');
+
+        // 3. 이미 해당 프로젝트에 가입되어 있는지 확인
+        const existing = await prisma.projectMember.findUnique({
+            where: { userEmail_projectId: { userEmail: targetEmail, projectId } }
+        });
+        
+        if (existing) {
+            if (existing.status === 'ACTIVE') {
+                throw new Error('이미 프로젝트에 참여 중인 회원입니다.');
+            } else if (existing.status === 'PENDING') {
+                throw new Error('이미 초대를 발송하여 응답을 대기 중인 회원입니다.');
+            } else {
+                // KICKED 또는 LEFT 상태인 경우 다시 초대 대기 상태로 변경
+                await prisma.projectMember.update({
+                    where: { id: existing.id },
+                    data: { status: 'PENDING', role: 'MEMBER', kickReason: null }
+                });
+                // 알림 생성
+                await prisma.notification.create({
+                    data: {
+                        userEmail: targetEmail,
+                        type: 'alert',
+                        title: '새로운 프로젝트 초대',
+                        content: `"${me.project.name}" 프로젝트에 초대되었습니다.`,
+                        link: '/projects'
+                    }
+                }).catch(err => console.error("Notification creation failed:", err));
+                return { success: true };
+            }
+        }
+
+        // 4. 새로운 멤버 추가 (PENDING 상태)
+        await prisma.projectMember.create({
+            data: {
+                userEmail: targetEmail,
+                projectId,
+                role: 'MEMBER',
+                status: 'PENDING'
+            }
+        });
+
+        // 5. 알림 생성
+        await prisma.notification.create({
+            data: {
+                userEmail: targetEmail,
+                type: 'alert',
+                title: '새로운 프로젝트 초대',
+                content: `"${me.project.name}" 프로젝트에 초대되었습니다.`,
+                link: '/projects'
+            }
+        }).catch(err => console.error("Notification creation failed:", err));
+
+        return { success: true };
+    },
+
+    transferLeadership: async (email: string, projectId: number, targetUserId: string) => {
+        const me = await prisma.projectMember.findUnique({
+            where: { userEmail_projectId: { userEmail: email, projectId } }
+        });
+        if (!me || me.role !== 'LEADER') throw new Error('권한이 없습니다.');
+
+        const targetMember = await prisma.projectMember.findFirst({
+            where: { projectId, user: { id: targetUserId } }
+        });
+        if (!targetMember) throw new Error('대상 유저를 찾을 수 없습니다.');
+
+        return await prisma.$transaction([
+            prisma.projectMember.update({
+                where: { id: targetMember.id },
+                data: { role: 'LEADER' }
+            }),
+            prisma.projectMember.update({
+                where: { id: me.id },
+                data: { role: 'MEMBER' }
+            })
+        ]);
+    },
+
+    kickMember: async (email: string, projectId: number, targetUserId: string, kickReason: string) => {
+        const me = await prisma.projectMember.findUnique({
+            where: { userEmail_projectId: { userEmail: email, projectId } }
+        });
+        if (!me || me.role !== 'LEADER') throw new Error('권한이 없습니다.');
+
+        const targetMember = await prisma.projectMember.findFirst({
+            where: { projectId, user: { id: targetUserId } }
+        });
+        if (!targetMember) throw new Error('대상 유저를 찾을 수 없습니다.');
+
+        return await prisma.$transaction([
+            prisma.projectMember.update({
+                where: { id: targetMember.id },
+                data: { status: 'KICKED', kickReason }
+            }),
+            prisma.project.update({
+                where: { id: projectId },
+                data: { members: { decrement: 1 } }
+            })
+        ]);
+    },
+
+    getKickedAlerts: async (email: string) => {
+        if (!email) return [];
+        const alerts = await prisma.projectMember.findMany({
+            where: { userEmail: email, status: 'KICKED' },
+            include: { project: { select: { name: true } } }
+        });
+        return alerts.map((a: any) => ({
+            projectId: a.projectId,
+            projectName: a.project.name,
+            kickReason: a.kickReason || '알 수 없는 사유'
+        }));
+    },
+
+    ackKickedAlert: async (email: string, projectId: number) => {
+        return await prisma.projectMember.delete({
+            where: { userEmail_projectId: { userEmail: email, projectId } }
+        });
+    },
+
+    getDeleteAlerts: async (email: string) => {
+        if (!email) return [];
+        return await prisma.projectDeleteAlert.findMany({
+            where: { userEmail: email },
+            orderBy: { createdAt: 'desc' }
+        });
+    },
+
+    ackDeleteAlert: async (email: string, alertId: number) => {
+        return await prisma.projectDeleteAlert.deleteMany({
+            where: { id: alertId, userEmail: email }
+        });
+    },
+
+
+    generateTasksWithAi: async (projectId: number, teamSize: number, topic: string, description: string) => {
+        if (!process.env.OPENAI_API_KEY) {
+            throw new Error("OpenAI API key is not configured.");
+        }
+
+        const project = await prisma.project.findUnique({
+            where: { id: projectId },
+            include: {
+                projectMembers: {
+                    where: { status: 'ACTIVE' },
+                    include: { user: { select: { email: true, name: true } } }
+                }
+            }
+        });
+
+        if (!project) throw new Error("프로젝트를 찾을 수 없습니다.");
+
+        const existingTasks = await (prisma as any).task.findMany({
+            where: { projectId },
+            select: { title: true, status: true }
+        });
+
+        const memberListStr = project.projectMembers.map(pm => `${pm.user.name} (${pm.user.email})`).join(', ');
+        const existingTasksStr = existingTasks.map((t: any) => `- ${t.title} (${t.status})`).join('\n');
+        
+        const systemPrompt = `
+You are an expert project manager assistant. Your job is to break down the user's project into HIGH-LEVEL, essential milestones.
+DO NOT create overly detailed or numerous micro-tasks.
+
+Project Details:
+- Topic/Type: ${topic}
+- Team Size: ${teamSize} members
+- Project Deadline: ${project.deadline || 'Not set'}
+- Active Members: ${memberListStr || 'No members yet'}
+
+Current Existing Tasks (Do not duplicate these):
+${existingTasksStr || 'No tasks yet'}
+
+Instructions:
+1. First, define 3 to 5 logical "Stages" (milestones or phases) appropriate for this specific type of project.
+   - For example, a software project might have stages: ["기획 및 설계", "프론트엔드 개발", "백엔드 개발", "테스트 및 QA"].
+   - A research project might have stages: ["주제 선정 및 자료조사", "설문 설계", "데이터 수집", "통계 분석", "결과 보고서 작성"].
+2. Next, create roughly 1 to 3 core tasks per team member. For a team of ${teamSize}, generate around ${Math.max(3, teamSize * 1)} to ${teamSize * 3} tasks in total.
+3. For each stage, assign:
+   - "id": an integer starting from 1.
+   - "title": a clear, concise stage name IN KOREAN.
+   - "description": a brief explanation of what happens in this stage.
+4. For each task, assign:
+   - "id": a unique short random string (e.g., "sk-123").
+   - "title": a clear, concise task name IN KOREAN.
+   - "priority": one of "low", "medium", "high".
+   - "deadline": A realistic deadline date in YYYY-MM-DD format based on the project deadline. If project deadline is not set, leave it as an empty string "".
+   - "assignees": An array containing the email address of the most suitable member from the Active Members list, or an empty array if unsure.
+   - "stageId": the integer ID of the stage this task belongs to.
+   - "requiresDeliverable": a boolean indicating if this task strictly requires submitting a file/report to be considered done (e.g. true for writing code/docs, false for simple research/communication).
+
+You must respond ONLY with a valid JSON object containing "stages" and "tasks" arrays. Never include markdown formatting like \`\`\`json. Example:
+{
+  "stages": [
+    { "id": 1, "title": "기획 및 설계", "description": "요구사항 정의 및 와이어프레임 작성" },
+    { "id": 2, "title": "프론트엔드 개발", "description": "UI 컴포넌트 개발" }
+  ],
+  "tasks": [
+    { "id": "t-1", "title": "요구사항 정의서 작성", "priority": "high", "deadline": "2024-05-15", "assignees": ["user1@example.com"], "stageId": 1, "requiresDeliverable": true },
+    { "id": "t-2", "title": "관련 사례 조사", "priority": "medium", "deadline": "", "assignees": [], "stageId": 1, "requiresDeliverable": false }
+  ]
+}
+`;
+
+        const userPrompt = description ? `세부 요구사항: ${description}` : `제시된 팀 규모와 주제에 맞게 핵심 업무를 분배해 주세요.`;
+
+
+        const response = await openai.chat.completions.create({
+            model: "gpt-4o",
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: userPrompt }
+            ],
+            temperature: 0.7,
+        });
+
+        const content = response.choices[0]?.message?.content || "{}";
+        try {
+            const raw = content;
+            let cleaned = raw.trim();
+            if (cleaned.startsWith('```json')) cleaned = cleaned.replace(/^```json/, '');
+            if (cleaned.startsWith('```')) cleaned = cleaned.replace(/^```/, '');
+            if (cleaned.endsWith('```')) cleaned = cleaned.replace(/```$/, '');
+            
+            const parsed = JSON.parse(cleaned.trim());
+            
+            // 모든 생성된 테스크의 마감일을 프로젝트의 마감일로 통일
+            const unifiedDeadline = project.deadline ? project.deadline.replace(/\./g, '-') : '';
+            if (parsed.tasks && Array.isArray(parsed.tasks)) {
+                parsed.tasks = parsed.tasks.map((task: any) => ({
+                    ...task,
+                    deadline: unifiedDeadline
+                }));
+            }
+            
+            return parsed;
+        } catch (e: any) {
+            console.error("AI parsing error:", e);
+            throw new Error("AI 응답을 파싱하는데 실패했습니다.");
+        }
+    },
+
+    evaluateProjectWithAi: async (projectId: number, reportText: string) => {
+        if (!process.env.OPENAI_API_KEY) {
+            throw new Error("OpenAI API key is not configured.");
+        }
+
+        const project = await prisma.project.findUnique({
+            where: { id: projectId }
+        });
+        if (!project) throw new Error("프로젝트를 찾을 수 없습니다.");
+
+        const systemPrompt = `
+You are an expert project evaluator and professor. Your job is to review the final project report provided by the user and give an objective, constructive evaluation based on the project's original topic and description.
+
+Project Details:
+- Topic: ${project.name}
+- Course/Context: ${project.course || 'N/A'}
+- Initial Goal/Description: ${project.description || 'N/A'}
+
+Evaluate the provided report on the following criteria:
+1. Relevance: Does it address the original topic?
+2. Completeness: Is it logically sound and complete?
+3. Quality: Are there clear insights or conclusions?
+
+You must respond ONLY with a valid JSON object. Never include markdown formatting like \`\`\`json.
+All text values inside the JSON MUST be written in Korean (한국어).
+Format:
+{
+  "score": <integer between 0 and 100>,
+  "strengths": [ <string in Korean>, <string in Korean> ... (2-3 items) ],
+  "weaknesses": [ <string in Korean>, <string in Korean> ... (2-3 items) ],
+  "summary": "<string in Korean, an overall encouraging but objective summary>"
+}
+`;
+
+        const userPrompt = `Here is the final report:\n\n${reportText}`;
+
+        const response = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            temperature: 0.3,
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: userPrompt }
+            ]
+        });
+
+        try {
+            const raw = response.choices[0]?.message?.content || "{}";
+            let cleaned = raw.trim();
+            if (cleaned.startsWith('```json')) cleaned = cleaned.replace(/^```json/, '');
+            if (cleaned.startsWith('```')) cleaned = cleaned.replace(/^```/, '');
+            if (cleaned.endsWith('```')) cleaned = cleaned.replace(/```$/, '');
+            
+            const parsed = JSON.parse(cleaned.trim());
+
+            // Save the evaluation to the project
+            await prisma.project.update({
+                where: { id: projectId },
+                data: {
+                    aiEvaluationScore: parsed.score,
+                    aiEvaluationReport: parsed
+                }
+            });
+
+            return parsed;
+        } catch (e: any) {
+            console.error("AI parsing error:", e);
+            throw new Error("AI 응답을 파싱하는데 실패했습니다.");
+        }
+    },
+
+    updateStatus: async (email: string, projectId: number, status: string) => {
+        const member = await prisma.projectMember.findUnique({
+            where: { userEmail_projectId: { userEmail: email, projectId } }
+        });
+
+        if (!member) throw new Error("권한이 없습니다.");
+
+        const updated = await prisma.project.update({
+            where: { id: projectId },
+            data: { status }
+        });
+        return updated;
+    },
+
+    updateStages: async (email: string, projectId: number, stages: any) => {
+        const member = await prisma.projectMember.findUnique({
+            where: { userEmail_projectId: { userEmail: email, projectId } }
+        });
+
+        if (!member) throw new Error("권한이 없습니다.");
+
+        const updated = await prisma.project.update({
+            where: { id: projectId },
+            data: { customStages: stages }
+        });
+        return updated;
+    },
+
+    searchAll: async (email: string, projectId: number, query: string) => {
+        const member = await prisma.projectMember.findUnique({
+            where: { userEmail_projectId: { userEmail: email, projectId } }
+        });
+
+        if (!member) throw new Error("권한이 없습니다.");
+
+        const [messages, tasks, files] = await Promise.all([
+            prisma.message.findMany({
+                where: {
+                    projectId,
+                    content: { contains: query } // PostgreSQL default mode is case-sensitive, but contains searches substrings. To make it case insensitive, we can add mode: 'insensitive'
+                },
+                include: { sender: { select: { name: true } } },
+                orderBy: { createdAt: 'desc' },
+                take: 50
+            }),
+            prisma.task.findMany({
+                where: {
+                    projectId,
+                    OR: [
+                        { title: { contains: query } },
+                        { description: { contains: query } }
+                    ]
+                },
+                take: 50
+            }),
+            prisma.driveFile.findMany({
+                where: {
+                    projectId,
+                    name: { contains: query }
+                },
+                take: 50
+            })
+        ]);
+
+        return { messages, tasks, files };
+    },
+
+    getPendingInvitations: async (email: string) => {
+        if (!email) return [];
+        const invitations = await prisma.projectMember.findMany({
+            where: { userEmail: email, status: 'PENDING' },
+            include: {
+                project: {
+                    include: {
+                        projectMembers: {
+                            where: { role: 'LEADER' },
+                            include: { user: { select: { name: true, email: true } } }
+                        }
+                    }
+                }
+            },
+            orderBy: { joinedAt: 'desc' }
+        });
+
+        return invitations.map((inv: any) => {
+            const leader = inv.project.projectMembers[0]?.user;
+            return {
+                id: inv.id,
+                projectId: inv.projectId,
+                projectName: inv.project.name,
+                course: inv.project.course,
+                description: inv.project.description,
+                color: inv.project.color || 'purple',
+                icon: inv.project.icon || 'Database',
+                deadline: inv.project.deadline,
+                leaderName: leader?.name || '알 수 없음',
+                leaderEmail: leader?.email || ''
+            };
+        });
+    },
+
+    acceptInvitation: async (email: string, projectId: number) => {
+        const member = await prisma.projectMember.findUnique({
+            where: { userEmail_projectId: { userEmail: email, projectId } }
+        });
+        if (!member || member.status !== 'PENDING') {
+            throw new Error('대기 중인 초대를 찾을 수 없습니다.');
+        }
+
+        await prisma.projectMember.update({
+            where: { id: member.id },
+            data: { status: 'ACTIVE' }
+        });
+
+        // 멤버수 1 증가
+        await prisma.project.update({
+            where: { id: projectId },
+            data: { members: { increment: 1 } }
+        });
+
+        return { success: true };
+    },
+
+    declineInvitation: async (email: string, projectId: number) => {
+        const member = await prisma.projectMember.findUnique({
+            where: { userEmail_projectId: { userEmail: email, projectId } }
+        });
+        if (!member || member.status !== 'PENDING') {
+            throw new Error('대기 중인 초대를 찾을 수 없습니다.');
+        }
+
+        await prisma.projectMember.delete({
+            where: { id: member.id }
+        });
+
+        return { success: true };
+    }
+};

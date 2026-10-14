@@ -1,0 +1,335 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ProjectRole {
+  LEADER
+  MEMBER
+}
+
+enum MemberStatus {
+  ACTIVE
+  KICKED
+  LEFT
+  PENDING
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  IN_REVIEW
+  DONE
+}
+
+enum TaskPriority {
+  low
+  medium
+  high
+}
+
+enum PlanType {
+  FREE
+  PRO
+}
+
+model User {
+  id               String   @id @default(uuid())
+  email            String   @unique
+  password         String
+  name             String
+  avatarUrl        String?
+  studentId        String?
+  department       String?
+  plan             PlanType @default(FREE)
+  aiUsageCount     Int      @default(0)
+  createdAt        DateTime @default(now())
+  projectMembers   ProjectMember[]
+  sentMessages     Message[]      @relation("SentMessages")
+  receivedMessages Message[]      @relation("ReceivedMessages")
+  driveFiles       DriveFile[]    @relation("UserDriveFiles")
+  taskComments     TaskComment[]
+  notifications    Notification[]
+  pushSubscriptions PushSubscription[]
+  chatReads        ChatRead[]
+  taskApprovals    TaskApproval[]
+  taskDeliverables TaskDeliverable[]
+  paymentCards     PaymentCard[]
+  driveFolders     DriveFolder[]
+}
+
+model Project {
+  id          Int      @id @default(autoincrement())
+  name        String
+  course      String?
+  description String?
+  progress    Int      @default(0)
+  deadline    String
+  members     Int      @default(1)
+  color       String?  @default("purple")
+  icon        String?  @default("Database")
+  inviteCode  String?  @unique
+  status      String   @default("ACTIVE") // ACTIVE, COMPLETED, ARCHIVED
+  customStages Json?
+  aiEvaluationScore  Int?
+  aiEvaluationReport Json?
+  createdAt   DateTime @default(now())
+
+  projectMembers ProjectMember[]
+  tasks           Task[]
+  schedules       Schedule[]
+  messages        Message[]
+  driveFolders    DriveFolder[]
+  driveFiles      DriveFile[]
+  votes           Vote[]
+}
+
+model ProjectMember {
+  id        Int          @id @default(autoincrement())
+  userEmail String
+  projectId Int
+  role      ProjectRole  @default(MEMBER)
+  status    MemberStatus @default(ACTIVE)
+  kickReason String?
+  joinedAt  DateTime @default(now())
+
+  user      User     @relation(fields: [userEmail], references: [email], onDelete: Cascade)
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([userEmail, projectId])
+}
+
+model Task {
+  id          String   @id @default(uuid())
+  projectId   Int
+  title       String
+  description String?
+  status      TaskStatus   @default(TODO)
+  priority    TaskPriority @default(medium)
+  deadline    String
+  ownerEmail  String?
+  assignees   String[]
+  unreadCommentBy String[]
+  requiresDeliverable Boolean @default(true)
+  completedAt DateTime?
+  createdAt   DateTime @default(now())
+
+  submitterEmail  String?
+
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  comments    TaskComment[]
+  approvals   TaskApproval[]
+  deliverables TaskDeliverable[]
+}
+
+model TaskDeliverable {
+  id           Int      @id @default(autoincrement())
+  taskId       String
+  name         String
+  originalName String
+  type         String
+  size         Int
+  url          String
+  uploaderEmail String
+  createdAt    DateTime @default(now())
+
+  task         Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  uploader     User     @relation(fields: [uploaderEmail], references: [email], onDelete: Cascade)
+}
+
+model TaskApproval {
+  id        Int      @id @default(autoincrement())
+  taskId    String
+  userEmail String
+  createdAt DateTime @default(now())
+
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userEmail], references: [email], onDelete: Cascade)
+
+  @@unique([taskId, userEmail])
+}
+
+model TaskComment {
+  id            Int      @id @default(autoincrement())
+  taskId        String
+  userEmail     String
+  content       String
+  isAnonymous   Boolean  @default(false)
+  anonymousName String?
+  createdAt     DateTime @default(now())
+
+  task          Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user          User     @relation(fields: [userEmail], references: [email], onDelete: Cascade)
+}
+
+model Schedule {
+  id         Int     @id @default(autoincrement())
+  projectId  Int?
+  title      String
+  date       String
+  endDate    String?
+  type       String  @default("other")
+  color      String  @default("bg-gray-500")
+  dot        String  @default("bg-gray-500")
+  ownerEmail String?
+
+  project    Project?  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model ProjectDeleteAlert {
+  id            Int      @id @default(autoincrement())
+  userEmail     String
+  projectName   String
+  deleteReason  String
+  createdAt     DateTime @default(now())
+}
+
+
+model Message {
+  id            Int      @id @default(autoincrement())
+  projectId     Int?     
+  senderEmail   String
+  receiverEmail String? 
+  content       String
+  isPinned      Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  
+  sender        User     @relation("SentMessages", fields: [senderEmail], references: [email], onDelete: Cascade)
+  receiver      User?    @relation("ReceivedMessages", fields: [receiverEmail], references: [email], onDelete: Cascade)
+  project       Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model Notification {
+  id        Int      @id @default(autoincrement())
+  userEmail String
+  type      String   // 'task', 'mention', 'alert'
+  title     String
+  content   String
+  isRead    Boolean  @default(false)
+  link      String?  // Optional link to redirect to
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userEmail], references: [email], onDelete: Cascade)
+}
+
+model PushSubscription {
+  id        Int      @id @default(autoincrement())
+  userEmail String
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userEmail], references: [email], onDelete: Cascade)
+}
+
+model DriveFolder {
+  id             Int           @id @default(autoincrement())
+  projectId      Int
+  name           String
+  theme          String        @default("blue")
+  createdAt      DateTime      @default(now())
+  creatorEmail   String?
+  parentFolderId Int?
+
+  project        Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  creator        User?         @relation(fields: [creatorEmail], references: [email], onDelete: SetNull)
+  parentFolder   DriveFolder?  @relation("FolderHierarchy", fields: [parentFolderId], references: [id], onDelete: Cascade)
+  childFolders   DriveFolder[] @relation("FolderHierarchy")
+  files          DriveFile[]
+}
+
+model DriveFile {
+  id             Int      @id @default(autoincrement())
+  projectId      Int
+  folderId       Int?
+  name           String
+  originalName   String
+  type           String
+  size           Int
+  url            String
+  uploaderEmail  String
+  createdAt      DateTime @default(now())
+
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  folder         DriveFolder? @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  uploader       User     @relation("UserDriveFiles", fields: [uploaderEmail], references: [email], onDelete: Cascade)
+}
+
+model Vote {
+  id          Int      @id @default(autoincrement())
+  projectId   Int
+  title       String
+  description String?
+  isAnonymous Boolean  @default(false)
+  isMultiple  Boolean  @default(false)
+  deadline    DateTime?
+  creatorEmail String
+  createdAt   DateTime @default(now())
+
+  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  options     VoteOption[]
+  records     VoteRecord[]
+}
+
+model VoteOption {
+  id        Int      @id @default(autoincrement())
+  voteId    Int
+  text      String
+  order     Int      @default(0)
+
+  vote      Vote         @relation(fields: [voteId], references: [id], onDelete: Cascade)
+  records   VoteRecord[]
+}
+
+model VoteRecord {
+  id         Int      @id @default(autoincrement())
+  voteId     Int
+  optionId   Int
+  userEmail  String
+  createdAt  DateTime @default(now())
+
+  vote       Vote       @relation(fields: [voteId], references: [id], onDelete: Cascade)
+  option     VoteOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+
+  @@unique([voteId, optionId, userEmail])
+}
+
+model ChatRead {
+  id            Int      @id @default(autoincrement())
+  userEmail     String
+  roomKey       String
+  lastReadMsgId Int      @default(0)
+  updatedAt     DateTime @default(now()) @updatedAt
+
+  user          User     @relation(fields: [userEmail], references: [email], onDelete: Cascade)
+  
+  @@unique([userEmail, roomKey])
+}
+
+model EmailVerification {
+  id         Int      @id @default(autoincrement())
+  email      String   @unique
+  code       String
+  expiresAt  DateTime
+  isVerified Boolean  @default(false)
+  createdAt  DateTime @default(now())
+}
+
+model PaymentCard {
+  id           Int      @id @default(autoincrement())
+  userEmail    String
+  cardCompany  String   // 카드사 이름 (e.g. 신한, 국민, 현대)
+  maskedNumber String   // 마스킹된 번호 (e.g. **** **** **** 1234)
+  expiryMonth  String   // 유효기간 월 (e.g. 12)
+  expiryYear   String   // 유효기간 년 (e.g. 27)
+  cardHolder   String   // 카드 소유자명
+  createdAt    DateTime @default(now())
+
+  user         User     @relation(fields: [userEmail], references: [email], onDelete: Cascade)
+}
+
