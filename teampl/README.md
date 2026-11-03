@@ -137,6 +137,6 @@ docker compose -f docker-compose.prod.yml up --build -d
 
 ## 기여자
 
-- [philip107-jo](https://github.com/philip107-jo) — 태스크/칸반 워크플로우, AI 기능, 기여도 분석 알고리즘, 채팅·화상통화, 공유 드라이브, UI/UX, Docker 인프라
+- philip107-jo
 - sunwoo427
 - ssh09140-bot
